@@ -44,8 +44,8 @@ void init_timerA1(void) { // Opsætning af vores timeren A1. Bruges til at styre
     TA1CCR0 = 1024; // Den skal tælle op til 1024 clock-cyklusser før den resetter.
     TA1CCR1 = 512; // Dette er vores initial 'duty cycle', på 50%. Det betyder at vi tæller op til 512, som er halvdelen af vores frekvens på 1024. 
     TA1CCTL1 = OUTMOD_2; // Den her bruger vi for at fortæller, at vi bruger output mode 2. Det betyder vi toggler selve outputtet ved CCR1, og resetter timeren ved CCR0. 
-    P2DIR |= BIT0;      // Sæt P2.0 som output
-    P2SEL |= BIT0;      // Sæt P2.0 til dens PWM funktion
+    //P2DIR |= BIT0;      // Sæt P2.0 som output
+    //P2SEL |= BIT0;      // Sæt P2.0 til dens PWM funktion
 }
 
 void init_timerA0(void) { // Vores anden timer. Den holder styr på at hente værdien fra vores input pin, altså capture. 
@@ -69,22 +69,22 @@ __interrupt void Timer_A1_ISR(void) {
     switch(TA0IV) {
         case 0x02:
 
-            P2OUT ^= BIT2;
-
             if (last1 > TA0CCR1)
             captured_value1 = 65535-last1 + TA0CCR1;
             else
             captured_value1 = (TA0CCR1 - last1);
             last1 = TA0CCR1; 
-            i++;
             
+            P2OUT ^= BIT2;
+            i++;
+
             if (i == 2)
             {
             freq1 = (float)(32768.0 / captured_value1);
 
             captured_value1 = 0;
-            i = 0;
             t_flag1 = 1;
+            i = 0;
             }
 
         break;
@@ -94,13 +94,17 @@ __interrupt void Timer_A1_ISR(void) {
              captured_value2 = 65535-last2 + TA0CCR2;
             else
             captured_value2 = (TA0CCR2 - last2);
+            last2 = TA0CCR2;
+
             P2OUT ^= BIT3;
             n++;
+
             if (n == 2)
             {
-            freq2 = (float)(32768 / captured_value2);
-            t_flag2 = 1;
+            freq2 = (float)(32768.0 / captured_value2);
+            
             captured_value2 = 0;
+            t_flag2 = 1;
             n = 0;
             }
 
@@ -124,7 +128,7 @@ int main() {
     __delay_cycles(1000000); // Lille delay
     reset_diplay();
     __delay_cycles(1000000); // Lille delay
-    ssd1306_printText(0, 0, "Hello"); 
+    
 
     // Timeropsætning
     init_timerA1();
@@ -132,6 +136,9 @@ int main() {
 
     P1DIR |= BIT0; // internal LED p1.0 as output
     P1OUT |= BIT0;
+
+    P2DIR |= BIT3 | BIT2 | BIT0;
+    P2SEL |= BIT0; // enable PWM output
 
     unsigned int Xd = 0;
 
@@ -148,8 +155,12 @@ int main() {
     unsigned int freq1_av, freq2_av;
 
     char buffer[20];
+    unsigned int duty_cycle = 50;
 
   while (1) {
+
+    sprintf(buffer, "DUTY: %03u%%", duty_cycle); 
+    ssd1306_printText(0, 0, buffer);
 
     sprintf(buffer, "TA0CCR1:%06u", TA0CCR1); 
     ssd1306_printText(0, 1, buffer);
