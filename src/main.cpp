@@ -13,7 +13,7 @@ volatile char t_flag1 = 0, t_flag2 = 0;
 
 // Opsætning af vores Sub Master Clock (SMC) til at køre 25MHz
 void init_SMCLK_25MHz() {
-
+    WDTCTL = WDTPW | WDTHOLD; // Stop the watchdog timer
   // Vi vælger at port 5.2 og 5.3 skal være aktiverede til deres analoge funktion
   P5SEL |= BIT2 + BIT3; // Select XT2 for SMCLK (Pins 5.2 and 5.3)
   P5SEL |= BIT4 + BIT5;
@@ -60,13 +60,16 @@ void init_timerA0(void) { // Vores anden timer. Den holder styr på at hente væ
 }
 
 #pragma vector=TIMER0_A1_VECTOR
-__interrupt void Timer0_A1_ISR(void) {
+__interrupt void Timer_A1_ISR(void) {
 
-    static unsigned int last1 = 0, last2 = 0;
+    static unsigned int last1 = 0;
     static int i = 0, n = 0;
+    static unsigned int last2 = 0;
 
     switch(TA0IV) {
-        case 2:
+        case 0x02:
+
+            P2OUT ^= BIT2;
 
             if (last1 > TA0CCR1)
             captured_value1 = 65535-last1 + TA0CCR1;
@@ -85,7 +88,7 @@ __interrupt void Timer0_A1_ISR(void) {
             }
 
         break;
-        case 4:
+        case 0x04:
 
             if (last2 > TA0CCR2)
              captured_value2 = 65535-last2 + TA0CCR2;
@@ -107,8 +110,6 @@ __interrupt void Timer0_A1_ISR(void) {
     }
 }
 
-
-
 int main() {
     WDTCTL = WDTPW | WDTHOLD; // Stop the watchdog timer.
 
@@ -123,16 +124,14 @@ int main() {
     __delay_cycles(1000000); // Lille delay
     reset_diplay();
     __delay_cycles(1000000); // Lille delay
+    ssd1306_printText(0, 0, "Hello"); 
 
     // Timeropsætning
     init_timerA1();
     init_timerA0();
 
     P1DIR |= BIT0; // internal LED p1.0 as output
-    P4DIR |= BIT7; // internal LED on P4.7 as output
-
-    P2DIR |= BIT3 | BIT2 | BIT0;
-    P2SEL |= BIT0; // enable PWM output
+    P1OUT |= BIT0;
 
     unsigned int Xd = 0;
 
@@ -149,26 +148,27 @@ int main() {
     unsigned int freq1_av, freq2_av;
 
     char buffer[20];
-    
+
   while (1) {
 
+    sprintf(buffer, "TA0CCR1:%06u", TA0CCR1); 
+    ssd1306_printText(0, 1, buffer);
+
+    sprintf(buffer, "FREQ1:%06u", freq1); 
+    ssd1306_printText(0, 2, buffer);
+
+    sprintf(buffer, "TA0CCR2:%06u", TA0CCR2); 
+    ssd1306_printText(0, 3, buffer);
+
+    sprintf(buffer, "FREQ2:%06u", freq2); 
+    ssd1306_printText(0, 4, buffer);
+
     if (t_flag1) {
-
-        sprintf(buffer, "TA0CCR1:%04u", TA0CCR1); 
-        ssd1306_printText(0, 1, buffer);
-
-        sprintf(buffer, "TA0CCR1:%04u", freq1); 
-        ssd1306_printText(0, 1, buffer);
+        t_flag1=0;
     }
     
     if (t_flag2){
-
-
-        sprintf(buffer, "TA0CCR1:%04u", TA0CCR2); 
-        ssd1306_printText(0, 1, buffer);
-
-        sprintf(buffer, "TA0CCR1:%04u", freq2); 
-        ssd1306_printText(0, 1, buffer);
+        t_flag2=0;
 	}
   }
 

@@ -9,7 +9,7 @@
 #define I2C_H_
 
 #include <msp430.h>
-#define smclk_frequency 1000000
+#define smclk_frequency 20000000
 #define i2c_frequency 50000
 
 extern unsigned char *PTxData;                                                       // Pointer to TX data
