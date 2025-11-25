@@ -4,183 +4,197 @@
 #include <msp430.h>
 #include <msp430f5529.h>
 
-int captured_value1 = 0;
-int captured_value2 = 0;
-float freq1 = 0, freq2 = 0;
-float freqMax = 525.0;
+// ======== GLOBALS ========
+// I denne sektion 
 
-volatile char t_flag1 = 0, t_flag2 = 0;
+/* Variablerne vi bruger til at gemme de to værdier, som vi finder fra vores capture timer A0
+Bemærk at de er volatile (Det betyder at vi kan ændre dem i en interrupt service routine)
+at de er unsigned (Altså at de kun kan være positive, det bliver vigtigt senere)*/ 
+volatile uint16_t cap1_delta = 0;
+volatile uint16_t cap2_delta = 0;
 
-// Opsætning af vores Sub Master Clock (SMC) til at køre 25MHz
+/* Variablerne hvor vi gemmer vores beregninger, både frekvensen (Tællinger per sekund)
+og rpm (Omgange per minut). Bemærk de er af typen float, så der er plads til kommatal*/
+volatile float freq1 = 0.0f;
+volatile float freq2 = 0.0f;
+volatile float rpm1 = 0.0f;
+volatile float rpm2 = 0.0f;
+
+/* Variabler hvor vi gemmer den nye frekvens, igen volatile, igen unsigned*/
+volatile uint8_t new_freq1 = 0;
+volatile uint8_t new_freq2 = 0;
+
+/* Eventuelle småting */
+const float PULSES_PER_REV = 48.0f;  // Tælling på en omgang. Vores motor har 48 rises på en omgang.
+uint16_t duty_cycle; // En unsigned integer til at gemme vores duty-cycle værdi i. 
+
+
+// ======================================================
+//  CLOCK: 25 MHz SMCLK
+// ======================================================
 void init_SMCLK_25MHz() {
-    WDTCTL = WDTPW | WDTHOLD; // Stop the watchdog timer
-  // Vi vælger at port 5.2 og 5.3 skal være aktiverede til deres analoge funktion
-  P5SEL |= BIT2 + BIT3; // Select XT2 for SMCLK (Pins 5.2 and 5.3)
-  P5SEL |= BIT4 + BIT5;
+    WDTCTL = WDTPW | WDTHOLD; // Stop watch-dog timeren. Det skal vi bare.
 
+    // De her porte bliver sat til deres analoge funktion.
+    P5SEL |= BIT2 + BIT3;
+    P5SEL |= BIT4 + BIT5;
 
-  // Configure DCO to 25 MHz
-  __bis_SR_register(SCG0); // Disable FLL control loop. Vi skal gøre det her for at få lov til at redigere i registeret.
-  UCSCTL0 = 0x0000;        // Set lowest possible DCOx and MODx
-  UCSCTL1 = DCORSEL_7;     // Select DCO range (DCORSEL_7 for max range)
-  UCSCTL2 = FLLD_0 + 610;  // FLLD = 1, Multiplier N = 762 for ~25 MHz DCO   - 610 for 20Mhz
-  // calculated by f DCOCLK  =32.768kHz×610=20MHz
-  __bic_SR_register(SCG0); // Enable FLL control loop. Husk at enable igen, for at lukke registeret korrekt. 
+    __bis_SR_register(SCG0);
+    UCSCTL0 = 0x0000;
+    UCSCTL1 = DCORSEL_7;
+    UCSCTL2 = FLLD_0 + 610;  
+    __bic_SR_register(SCG0);
 
-  // Loop until XT2, XT1, and DCO stabilize
-  do
-  {
-    UCSCTL7 &= ~(XT2OFFG + XT1LFOFFG + DCOFFG); // Clear fault flags
-    SFRIFG1 &= ~OFIFG;                          // Clear oscillator fault flags
-  } while (SFRIFG1 & OFIFG); // Wait until stable
+    do {
+        UCSCTL7 &= ~(XT2OFFG + XT1LFOFFG + DCOFFG);
+        SFRIFG1 &= ~OFIFG;
+    } while (SFRIFG1 & OFIFG);
 
-  UCSCTL3 = SELREF__REFOCLK;                            // Set FLL reference to REFO
-  UCSCTL4 = SELA__XT1CLK | SELS__DCOCLK | SELM__DCOCLK; // Set ACLK = XT1; SMCLK = DCO; MCLK = DCO
-  UCSCTL5 = DIVS__1;                                    // Set SMCLK divider to 1 (no division)
+    UCSCTL3 = SELREF__REFOCLK;
+    UCSCTL4 = SELA__XT1CLK | SELS__DCOCLK | SELM__DCOCLK;
+    UCSCTL5 = DIVS__1;
 }
 
-void init_timerA1(void) { // Opsætning af vores timeren A1. Bruges til at styre PWM signalet ud på P2.0.
-    TA1CTL = TASSEL_2 | MC_3 | ID_0; // Tassel 2 er clock-kilden "Sub Master Clock" som kører på 25MHz. MC1 står for timer mode, og 3 betyder up/down, altså center aligned. TACLR betyder timer clear.
-    TA1CCR0 = 1024; // Den skal tælle op til 1024 clock-cyklusser før den resetter.
-    TA1CCR1 = 512; // Dette er vores initial 'duty cycle', på 50%. Det betyder at vi tæller op til 512, som er halvdelen af vores frekvens på 1024. 
-    TA1CCTL1 = OUTMOD_2; // Den her bruger vi for at fortæller, at vi bruger output mode 2. Det betyder vi toggler selve outputtet ved CCR1, og resetter timeren ved CCR0. 
-    //P2DIR |= BIT0;      // Sæt P2.0 som output
-    //P2SEL |= BIT0;      // Sæt P2.0 til dens PWM funktion
+
+// ======================================================
+//  PWM on Timer A1 — OUTMOD_2 (center-aligned)
+// ======================================================
+void init_timerA1(void) {
+    TA1CTL = TASSEL_2 | MC_3 | ID_0;  // Tassel_2 
+                                      // MC_3 
+                                      // ID_0
+    TA1CCR0 = 1024;                   // PWM periodetiden
+    TA1CCR1 = 512;                    // Tælletiden, der definerer hvor 
+    TA1CCTL1 = OUTMOD_2;              // Toggle/reset tilstand, hvilket giver et centeraligned PWM signal
+    duty_cycle = (float)(TA1CCR1*100/TA1CCR0); // Vi udregner duty-cyclen i procent
 }
 
-void init_timerA0(void) { // Vores anden timer. Den holder styr på at hente værdien fra vores input pin, altså capture. 
-    TA0CTL = TASSEL_1 | MC_2 | ID_0; // Aclock 
-    
-    TA0CCTL1 = CM_1 | CCIS_0 | CAP | CCIE | SCS;
-    TA0CCTL2 = CM_1 | CCIS_0 | CAP | CCIE | SCS;
-    
-    P1DIR &= ~(BIT2 | BIT3);
-    P1SEL |= (BIT2 | BIT3); 
-     
+// ======================================================
+//  TIMER A0 CAPTURE — frequency measurement
+// ======================================================
+void init_timerA0(void) {
+
+    TA0CTL = TASSEL__ACLK | MC__CONTINUOUS | TACLR;  // Det her er opsætningen af timer 0 
+                                                     // Tassel_1 eller ACLK er det samme og står
+                                                     // MC_2 ELLER MC__CONTINUOUS
+                                                     // TACLR er timer clear, og betyder den nulstiller sig ved 
+
+    // CCR1 capture
+    TA0CCTL1 = CM_1 | CCIS_0 | CAP | CCIE | SCS;    // CM_1
+                                                    // CCIS_0
+                                                    // CAP
+                                                    // CCIE
+                                                    // SCS
+    // CCR2 capture
+    TA0CCTL2 = CM_1 | CCIS_0 | CAP | CCIE | SCS;    // Det er det samme, bare på det andet ben
+
+    P1DIR &= ~(BIT2 | BIT3);  // Pin 1.2 og 1.3 er vores indgangspins, det vælger vi her
+    P1SEL |= (BIT2 | BIT3); // Sætter dem til analog mode
 }
 
-#pragma vector=TIMER0_A1_VECTOR
-__interrupt void Timer_A1_ISR(void) {
 
-    static unsigned int last1 = 0;
-    static int i = 0, n = 0;
-    static unsigned int last2 = 0;
+// ======================================================
+//  TIMER A0 ISR (CCR1 & CCR2 capture events)
+// ======================================================
+#pragma vector = TIMER0_A1_VECTOR // Bemærk navnet her. Det er TIMEREN 0 der sætter gang i den her ISR. IKKE timeren 1.  
+__interrupt void TimerA0_ISR(void) 
+{
+    static uint16_t last1 = 0; // Vores to variabler hvor vi gemmer den seneste værdi fra CCR1 og CCR2
+    static uint16_t last2 = 0; // Bemærk at det er en lokalvariabel, så den burde bliver glemt efter hver gang æ. MEN den er static, så den 
 
-    switch(TA0IV) {
-        case 0x02:
+    switch (TA0IV)
+    {
+        case TA0IV_TACCR1:      // ---- CCR1 event ----
+        {
+            uint16_t now = TA0CCR1;
+            uint16_t diff = now - last1;
+            last1 = now;
 
-            if (last1 > TA0CCR1)
-            captured_value1 = 65535-last1 + TA0CCR1;
-            else
-            captured_value1 = (TA0CCR1 - last1);
-            last1 = TA0CCR1; 
-            
-            P2OUT ^= BIT2;
-            i++;
+            cap1_delta = diff;
+            freq1 = 32768.0f / (float)diff;
+            rpm1 = (freq1 * 60.0f) / PULSES_PER_REV;
 
-            if (i == 2)
-            {
-            freq1 = (float)(32768.0 / captured_value1);
-
-            captured_value1 = 0;
-            t_flag1 = 1;
-            i = 0;
-            }
-
+            new_freq1 = 1;
+        }
         break;
-        case 0x04:
 
-            if (last2 > TA0CCR2)
-             captured_value2 = 65535-last2 + TA0CCR2;
-            else
-            captured_value2 = (TA0CCR2 - last2);
-            last2 = TA0CCR2;
+        case TA0IV_TACCR2:      // ---- CCR2 event ----
+        {
+            uint16_t now = TA0CCR2;
+            uint16_t diff = now - last2;
+            last2 = now;
 
-            P2OUT ^= BIT3;
-            n++;
+            cap2_delta = diff;
+            freq2 = 32768.0f / (float)diff;
+            rpm2 = (freq2 * 60.0f) / PULSES_PER_REV;
 
-            if (n == 2)
-            {
-            freq2 = (float)(32768.0 / captured_value2);
-            
-            captured_value2 = 0;
-            t_flag2 = 1;
-            n = 0;
-            }
-
+            new_freq2 = 1;
+        }
         break;
+
         default:
-        break;
+            break;
     }
 }
 
+
+// ======================================================
+//                        MAIN
+// ======================================================
 int main() {
-    WDTCTL = WDTPW | WDTHOLD; // Stop the watchdog timer.
 
-    // Sæt sub-master-clock til 25MHz (ish)
+    WDTCTL = WDTPW | WDTHOLD;
+
     init_SMCLK_25MHz();
-    __delay_cycles(100000); // Lille delay
+    __delay_cycles(100000);
 
-    // Skærmopsætning
-    i2c_init();             
-    __delay_cycles(100000); // Lille delay
+    // OLED init
+    i2c_init();
+    __delay_cycles(100000);
     ssd1306_init();
-    __delay_cycles(1000000); // Lille delay
+    __delay_cycles(1000000);
     reset_diplay();
-    __delay_cycles(1000000); // Lille delay
-    
+    __delay_cycles(1000000);
 
-    // Timeropsætning
+    // TIMERS
     init_timerA1();
     init_timerA0();
 
-    P1DIR |= BIT0; // internal LED p1.0 as output
+    // LED for debug
+    P1DIR |= BIT0;
     P1OUT |= BIT0;
 
-    P2DIR |= BIT3 | BIT2 | BIT0;
-    P2SEL |= BIT0; // enable PWM output
-
-    unsigned int Xd = 0;
+    // PWM pin
+    P2DIR |= BIT0;
+    P2SEL |= BIT0;
 
     __enable_interrupt();
-    float Gm = 1;
-    float Gin = 0;
-
-    float Xe, Xf;
-    int error = 0;
-    float G = 1;
-    float adc_res_av = 0;
-    int k = 0, m = 0, n = 0;
-    char data[12];
-    unsigned int freq1_av, freq2_av;
 
     char buffer[20];
-    unsigned int duty_cycle = 50;
 
-  while (1) {
+    while (1)
+    {
+        sprintf(buffer, "DUTY: %03u%%", duty_cycle);
+        ssd1306_printText(0, 0, buffer);
 
-    sprintf(buffer, "DUTY: %03u%%", duty_cycle); 
-    ssd1306_printText(0, 0, buffer);
+        // TA0 raw timestamps (debug)
+        sprintf(buffer, "TA0CCR1:%05u", TA0CCR1);
+        ssd1306_printText(0, 1, buffer);
 
-    sprintf(buffer, "TA0CCR1:%06u", TA0CCR1); 
-    ssd1306_printText(0, 1, buffer);
+        sprintf(buffer, "TA0CCR2:%05u", TA0CCR2);
+        ssd1306_printText(0, 2, buffer);
 
-    sprintf(buffer, "FREQ1:%06u", freq1); 
-    ssd1306_printText(0, 2, buffer);
+        // updated by ISR
+        //sprintf(buffer, "FREQ1:%6.1f", freq1);
+        //ssd1306_printText(0, 2, buffer);
 
-    sprintf(buffer, "TA0CCR2:%06u", TA0CCR2); 
-    ssd1306_printText(0, 3, buffer);
+        sprintf(buffer, "RPM1:%5d", (int)rpm1);
+        ssd1306_printText(0, 3, buffer);
 
-    sprintf(buffer, "FREQ2:%06u", freq2); 
-    ssd1306_printText(0, 4, buffer);
+        //sprintf(buffer, "FREQ2:%6.1f", freq2);
+        //ssd1306_printText(0, 4, buffer);
 
-    if (t_flag1) {
-        t_flag1=0;
+        sprintf(buffer, "RPM2:%5d", (int)rpm2);
+        ssd1306_printText(0, 4, buffer);
     }
-    
-    if (t_flag2){
-        t_flag2=0;
-	}
-  }
-
 }
