@@ -60,12 +60,12 @@ void init_SMCLK_25MHz() {
 //  PWM on Timer A1 — OUTMOD_2 (center-aligned)
 // ======================================================
 void init_timerA1(void) {
-    TA1CTL = TASSEL_2 | MC_3 | ID_0;  // Tassel_2 
-                                      // MC_3 
-                                      // ID_0
-    TA1CCR0 = 1024;                   // PWM periodetiden
-    TA1CCR1 = 512;                    // Tælletiden, der definerer hvor 
-    TA1CCTL1 = OUTMOD_2;              // Toggle/reset tilstand, hvilket giver et centeraligned PWM signal
+    TA1CTL = TASSEL_2 | MC_3 | ID_0;  // Tassel_2, eller SMCLK (sub master), er en clock vi selv har sat i funktionen over over til 25MHz.
+                                      // MC står for Mode Control, og mode control 3 er 'up/down' hvilket betyder den tæller fra 0 op til CCR0 og tilbage igen til 0. Altså en symmetrisk figur omkring CCR0.
+                                      // ID_0 er 'input divider', hvilket betyder den dividere clocken. Ret brugbart hvis man skal have flere timere på samme clock der kører lidt forskudt af hinanden. Vi bruge bare ID_0, hvilket betyder vi dividerer med 1.
+    TA1CCR0 = 1024;                   // PWM periodetiden, i form a den værdi vi gerne vil tælle op til
+    TA1CCR1 = 512;                    // Tælletiden, der definerer hvornår vores signal toggles 
+    TA1CCTL1 = OUTMOD_2;              // (out)put (mod)e 2 er Toggle/reset tilstand, hvilket giver at timeren toggler signalet med CCR1, og tæller tilbage igen (på grund af MC3), og toggler så igen ved CCR1. Se side 13 i TimerA user guide. 
     duty_cycle = (float)(TA1CCR1*100/TA1CCR0); // Vi udregner duty-cyclen i procent
 }
 
@@ -74,19 +74,19 @@ void init_timerA1(void) {
 // ======================================================
 void init_timerA0(void) {
 
-    TA0CTL = TASSEL__ACLK | MC__CONTINUOUS | TACLR;  // Det her er opsætningen af timer 0 
-                                                     // Tassel_1 eller ACLK er det samme og står
-                                                     // MC_2 ELLER MC__CONTINUOUS
-                                                     // TACLR er timer clear, og betyder den nulstiller sig ved 
+    TA0CTL = TASSEL__ACLK | MC__CONTINUOUS | TACLR;  // Det her er opsætningen af timer 0, den som står for at capture vores værdier
+                                                     // Tassel_1, ACLK (analog clock), er den clock source der er i microcontrolleren. Den kører på 32kHz cirka.
+                                                     // MC_2 ELLER MC__CONTINUOUS tæller fra 0 til 0FFFFh og forfra. 0FFFFh er det samme som vores clock-værdi. 
+                                                     // TACLR er en function der nulstiller clock divideren. Vi bruger ikke en clockdivider, så det er lidt mærkeligt at nulstille den. 
 
-    // CCR1 capture
-    TA0CCTL1 = CM_1 | CCIS_0 | CAP | CCIE | SCS;    // CM_1
-                                                    // CCIS_0
-                                                    // CAP
-                                                    // CCIE
-                                                    // SCS
+    // CCR1 Capture med control register 1
+    TA0CCTL1 = CM_1 | CCIS_0 | CAP | CCIE | SCS;    // Capture Mode 1 tilstand betyder at den reagere ved en 'rising edge'
+                                                    // Capture Compare Input Select 0, det har noget at gøre med hvilken input pin det skal være?
+                                                    // CAP = 1 bruges til at sætte den i capture mode
+                                                    // Capture Compare Interupt Enable betyder at man faktisk kan interrupte den her timer
+                                                    // Synchronize Capture Source betyder at timeren og input signalet skal være synkroniseret. 
     // CCR2 capture
-    TA0CCTL2 = CM_1 | CCIS_0 | CAP | CCIE | SCS;    // Det er det samme, bare på det andet ben
+    TA0CCTL2 = CM_1 | CCIS_0 | CAP | CCIE | SCS;    // Vi opsætter et register 2. 
 
     P1DIR &= ~(BIT2 | BIT3);  // Pin 1.2 og 1.3 er vores indgangspins, det vælger vi her
     P1SEL |= (BIT2 | BIT3); // Sætter dem til analog mode
@@ -102,23 +102,28 @@ __interrupt void TimerA0_ISR(void)
     static uint16_t last1 = 0; // Vores to variabler hvor vi gemmer den seneste værdi fra CCR1 og CCR2
     static uint16_t last2 = 0; // Bemærk at det er en lokalvariabel, så den burde bliver glemt efter hver gang æ. MEN den er static, så den 
 
-    switch (TA0IV)
+    switch (TA0IV) // Tilstand baseret på hvad der står i Interupt Vectoren for Timeren 0
     {
-        case TA0IV_TACCR1:      // ---- CCR1 event ----
+        case TA0IV_TACCR1:      // ---- CCR1 event ---- Hvis der står CCR1 i IV. 
         {
-            uint16_t now = TA0CCR1;
-            uint16_t diff = now - last1;
-            last1 = now;
+            uint16_t now = TA0CCR1; // Dette er værdien vi læser lige nu
+            uint16_t diff = now - last1; // Vi beregner forskellen mellem nu værdien og den forrige værdi. 
+                                        // Bemærk at vi ikke laver noget tjek på om den er større eller lavere 
+                                        // end noget bestemt. Det fordi vi bruger unsigned integers. Så vi vil 
+                                        // aldrig kunne få et negativt tal når vi trækker dem fra hinanden. 
+                                        // I stedet tæller vi bare op igen, når vi rammer nul, og det giver os 
+                                        // stadig den rigtige forskel mellem de tog tal.
+            last1 = now; // Vi sætter last til at være vores nuværende værdi. 
 
-            cap1_delta = diff;
-            freq1 = 32768.0f / (float)diff;
-            rpm1 = (freq1 * 60.0f) / PULSES_PER_REV;
+            cap1_delta = diff; // Den målte forskel gemmes, så vi kan bruge den senere. Lige nu bruges den ikke
+            freq1 = 32768.0f / (float)diff; // Vi udregner tællinger per sekund. Det gør vi ved at tage ACLK og dele med differencen.
+            rpm1 = (freq1 * 60.0f) / PULSES_PER_REV; // Derfra regner vi omgang per minut.  
 
-            new_freq1 = 1;
+            new_freq1 = 1; // Ikke i brug endnu. 
         }
         break;
 
-        case TA0IV_TACCR2:      // ---- CCR2 event ----
+        case TA0IV_TACCR2:      // ---- CCR2 event ---- Hvis der står CC2 i IV.
         {
             uint16_t now = TA0CCR2;
             uint16_t diff = now - last2;
@@ -128,7 +133,7 @@ __interrupt void TimerA0_ISR(void)
             freq2 = 32768.0f / (float)diff;
             rpm2 = (freq2 * 60.0f) / PULSES_PER_REV;
 
-            new_freq2 = 1;
+            new_freq2 = 1; // Ikke i brug endnu
         }
         break;
 
@@ -143,9 +148,9 @@ __interrupt void TimerA0_ISR(void)
 // ======================================================
 int main() {
 
-    WDTCTL = WDTPW | WDTHOLD;
+    WDTCTL = WDTPW | WDTHOLD; // Stop watchdog timeren
 
-    init_SMCLK_25MHz();
+    init_SMCLK_25MHz(); // Kør vores submasterclock funktion
     __delay_cycles(100000);
 
     // OLED init
@@ -172,10 +177,10 @@ int main() {
 
     char buffer[20];
 
-    while (1)
+    while (1) // Her printer vi reelt set bare alle vores tal. 
     {
-        sprintf(buffer, "DUTY: %03u%%", duty_cycle);
-        ssd1306_printText(0, 0, buffer);
+        //sprintf(buffer, "DUTY: %03u%%", duty_cycle);
+        //ssd1306_printText(0, 0, buffer);
 
         // TA0 raw timestamps (debug)
         sprintf(buffer, "TA0CCR1:%05u", TA0CCR1);
@@ -185,16 +190,18 @@ int main() {
         ssd1306_printText(0, 2, buffer);
 
         // updated by ISR
+        sprintf(buffer, "F1:%5d", (int)freq1);
         //sprintf(buffer, "FREQ1:%6.1f", freq1);
-        //ssd1306_printText(0, 2, buffer);
-
-        sprintf(buffer, "RPM1:%5d", (int)rpm1);
         ssd1306_printText(0, 3, buffer);
 
+        sprintf(buffer, "RPM1:%5d", (int)rpm1);
+        ssd1306_printText(0, 4, buffer);
+
+        sprintf(buffer, "F2:%5d", (int)freq2);
         //sprintf(buffer, "FREQ2:%6.1f", freq2);
-        //ssd1306_printText(0, 4, buffer);
+        ssd1306_printText(0, 5, buffer);
 
         sprintf(buffer, "RPM2:%5d", (int)rpm2);
-        ssd1306_printText(0, 4, buffer);
+        ssd1306_printText(0, 6, buffer);
     }
 }
