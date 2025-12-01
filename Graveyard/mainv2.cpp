@@ -27,8 +27,12 @@ volatile uint8_t new_freq2 = 0;
 /* Eventuelle småting */
 const float PULSES_PER_REV = 48.0f;  // Tælling på en omgang. Vores motor har 48 rises på en omgang.
 uint16_t duty_cycle; // En unsigned integer til at gemme vores duty-cycle værdi i. 
-volatile uint16_t average_freq = 0;
-volatile uint16_t display_freq = 0;
+const float demand_speed = 10; // Degrees per second
+const float demand_freq = 1500.0; // Mål den her ved 12V 50PVM.
+const float max_freq = 985.0; // Must be measured at 12V 100PWM
+const float gain_modulation = 1023 / max_freq; // (GM) En skaleringsfaktor der konverterer vores maskimale tilladte frekvens til en faktor mellem 0 og 1024
+const float gain_adjust = 0.25; // Vi bruger den her, så vi ikke skalere vores modulation med 100% af fejlværdien, men tager det i lidt mindre skridt. Altså udjævne stigningerne. 
+const float gain = gain_adjust*gain_modulation; // Vores endelige gain, vi bruger den her til at skalare vores målinger, så de falder mellem 0 - 1023. Så vi kan bruge en værdi til at definere TA1CCR1. Altså duty cycle.
 
 
 // ======================================================
@@ -76,25 +80,22 @@ void init_timerA1(void) {
 // ======================================================
 void init_timerA0(void) {
 
-    TA0CTL = TASSEL__ACLK | MC__CONTINUOUS | ID_0;  // Det her er opsætningen af timer 0, den som står for at capture vores værdier
+    TA0CTL = TASSEL__ACLK | MC__CONTINUOUS | TACLR;  // Det her er opsætningen af timer 0, den som står for at capture vores værdier
                                                      // Tassel_1, ACLK (analog clock), er den clock source der er i microcontrolleren. Den kører på 32kHz cirka.
                                                      // MC_2 ELLER MC__CONTINUOUS tæller fra 0 til 0FFFFh og forfra. 0FFFFh er det samme som vores clock-værdi. 
                                                      // TACLR er en function der nulstiller clock divideren. Vi bruger ikke en clockdivider, så det er lidt mærkeligt at nulstille den. 
 
     // CCR1 Capture med control register 1
-    TA0CCTL1 = CM_1 | CCIS_0 | CAP | CCIE ;    // Capture Mode 1 tilstand betyder at den reagere ved en 'rising edge'
+    TA0CCTL1 = CM_1 | CCIS_0 | CAP | CCIE | SCS;    // Capture Mode 1 tilstand betyder at den reagere ved en 'rising edge'
                                                     // Capture Compare Input Select 0, det har noget at gøre med hvilken input pin det skal være?
                                                     // CAP = 1 bruges til at sætte den i capture mode
                                                     // Capture Compare Interupt Enable betyder at man faktisk kan interrupte den her timer
                                                     // Synchronize Capture Source betyder at timeren og input signalet skal være synkroniseret. 
     // CCR2 capture
-    TA0CCTL2 = CM_1 | CCIS_0 | CAP | CCIE ;    // Vi opsætter et register 2. 
+    TA0CCTL2 = CM_1 | CCIS_0 | CAP | CCIE | SCS;    // Vi opsætter et register 2. 
 
     P1DIR &= ~(BIT2 | BIT3);  // Pin 1.2 og 1.3 er vores indgangspins, det vælger vi her
     P1SEL |= (BIT2 | BIT3); // Sætter dem til analog mode
-
-    P1REN |= (BIT2 | BIT3);   // resistor enabled
-    P1OUT &= ~(BIT2 | BIT3);  // pull-down (P1OUT=0 => pull-down)
 }
 
 
@@ -102,7 +103,7 @@ void init_timerA0(void) {
 //  TIMER A0 ISR (CCR1 & CCR2 capture events)
 // ======================================================
 #pragma vector = TIMER0_A1_VECTOR // Bemærk navnet her. Det er TIMEREN 0 der sætter gang i den her ISR. IKKE timeren 1.  
-__interrupt void Timer_A0_ISR(void) 
+__interrupt void TimerA0_ISR(void) 
 {
     static uint16_t last1 = 0; // Vores to variabler hvor vi gemmer den seneste værdi fra CCR1 og CCR2
     static uint16_t last2 = 0; // Bemærk at det er en lokalvariabel, så den burde bliver glemt efter hver gang æ. MEN den er static, så den 
@@ -118,37 +119,24 @@ __interrupt void Timer_A0_ISR(void)
                                         // aldrig kunne få et negativt tal når vi trækker dem fra hinanden. 
                                         // I stedet tæller vi bare op igen, når vi rammer nul, og det giver os 
                                         // stadig den rigtige forskel mellem de tog tal.
-            if (diff < 5) {               // threshold depends on expected frequency
-            last1 = now;
-            TA0CCTL1 &= ~CCIFG;
-            break;                    // ignore this bad capture
-            }
-
+            if (diff==0){diff=1;} // Hurtigt fiks på at vi ikke vil dividere med nul.
             last1 = now; // Vi sætter last til at være vores nuværende værdi. 
 
-            cap1_delta = diff ?: 1; // Den målte forskel gemmes, så vi kan bruge den senere. Lige nu bruges den ikke
-            
-            new_freq1 = 1; // Ikke i brug endnu. 
-            TA0CCTL1 &= ~CCIFG;  
+            // cap1_delta = diff; // Den målte forskel gemmes, så vi kan bruge den senere. Lige nu bruges den ikke
+            // if (cap1_delta==0) {cap1_delta=1;}
+
+            freq1 = 32768.0f / (float)diff; // Vi udregner tællinger per sekund. Det gør vi ved at dele ACLK med differencen.
+            rpm1 = (freq1 * 60.0f) / PULSES_PER_REV; // Derfra regner vi omgang per minut.  
+
+            //TA1CCR1 = gain * (demand_freq-freq1);
+
+            //new_freq1 = 1; // Ikke i brug endnu. 
         }
         break;
 
         case TA0IV_TACCR2:      // ---- CCR2 event ---- Hvis der står CC2 i IV.
         {
-            uint16_t now = TA0CCR2;
-            uint16_t diff = now - last2;
-
-            if (diff < 5) {               // threshold depends on expected frequency
-            last2 = now;
-            TA0CCTL2 &= ~CCIFG;
-            break;                    // ignore this bad capture
-            }
-
-            cap2_delta = diff ?: 1;
-            last2 = now;
-
-            new_freq2 = 1; // Ikke i brug endnu
-            TA0CCTL2 &= ~CCIFG;  // ⬅ IMPORTANT!
+             last1 = TA0CCR2; // Vi gemmer bare den nuværende CCR2 værdi som vores seneste værdi
         }
         break;
 
@@ -192,35 +180,8 @@ int main() {
 
     char buffer[20];
 
-    int counter;
-
     while (1) // Her printer vi reelt set bare alle vores tal. 
     {
-        if (new_freq1==1)
-        {
-            freq1 = 32768.0f / (float)cap1_delta; // Vi udregner tællinger per sekund. Det gør vi ved at tage ACLK og dele med differencen.
-            rpm1 = (freq1 * 60.0f) / PULSES_PER_REV; // Derfra regner vi omgang per minut.  
-
-            average_freq += freq1;
-            counter++;
-
-            if (counter==10) { 
-                display_freq = (float)(average_freq / 10); 
-                average_freq=0;
-                counter=0;
-            }
-
-            new_freq1=0;
-        }
-        
-        if(new_freq2==1) {
-            
-            freq2 = 32768.0f / (float)cap2_delta;
-            rpm2 = (freq2 * 60.0f) / PULSES_PER_REV;
-
-            new_freq2=0;
-        }
-
         //sprintf(buffer, "DUTY: %03u%%", duty_cycle);
         //ssd1306_printText(0, 0, buffer);
 
@@ -232,18 +193,18 @@ int main() {
         ssd1306_printText(0, 2, buffer);
 
         // updated by ISR
-        sprintf(buffer, "F1:%5d", (int)display_freq);
+        sprintf(buffer, "F1:%5d", (int)freq1);
         //sprintf(buffer, "FREQ1:%6.1f", freq1);
         ssd1306_printText(0, 3, buffer);
 
         sprintf(buffer, "RPM1:%5d", (int)rpm1);
         ssd1306_printText(0, 4, buffer);
 
-        sprintf(buffer, "F2:%5d", (int)freq2);
-        //sprintf(buffer, "FREQ2:%6.1f", freq2);
-        ssd1306_printText(0, 5, buffer);
+        // sprintf(buffer, "F2:%5d", (int)freq2);
+        // //sprintf(buffer, "FREQ2:%6.1f", freq2);
+        // ssd1306_printText(0, 5, buffer);
 
-        sprintf(buffer, "RPM2:%5d", (int)rpm2);
-        ssd1306_printText(0, 6, buffer);
+        // sprintf(buffer, "RPM2:%5d", (int)rpm2);
+        // ssd1306_printText(0, 6, buffer);
     }
 }
