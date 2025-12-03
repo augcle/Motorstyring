@@ -20,7 +20,7 @@ volatile float freq2 = 0.0f;
 volatile float rpm1 = 0.0f;
 volatile float rpm2 = 0.0f;
 
-/* Variabler hvor vi gemmer den nye frekvens, igen volatile, igen unsigned*/
+/* Variabler hvor vi flagger at der er kommet et interrupt.*/
 volatile uint8_t new_freq1 = 0;
 volatile uint8_t new_freq2 = 0;
 
@@ -29,6 +29,29 @@ const float PULSES_PER_REV = 48.0f;  // Tælling på en omgang. Vores motor har 
 uint16_t duty_cycle; // En unsigned integer til at gemme vores duty-cycle værdi i. 
 volatile uint16_t average_freq = 0;
 volatile uint16_t display_freq = 0;
+
+/*
+Diameter=10
+DISTANCE_PER_PULSE = 3.14*Diameter
+demand_freq_shaft=S_demand / DISTANCE_PER_PULSE
+demand_freq_encoder = demand_freq_shaft / 30
+*/
+const float demand_freq = 2000.0; // Mål den her ved 12V 50PVM.
+const float max_freq = 4329.0; // Must be measured at 12V 100PWM
+const float gain_modulation = 1024 / max_freq; // (GM) En skaleringsfaktor der konverterer vores maskimale tilladte frekvens til en faktor mellem 0 og 1024
+const float gain_adjust = 0.25; // Vi bruger den her, så vi ikke skalere vores modulation med 100% af fejlværdien, men tager det i lidt mindre skridt. Altså udjævne stigningerne. 
+const float gain = gain_adjust*gain_modulation; // Vores endelige gain, vi bruger den her til at skalare vores målinger, så de falder mellem 0 - 1023. Så vi kan bruge en værdi til at definere TA1CCR1. Altså duty cycle.
+int16_t errorCC = 0;
+
+
+// 990 in max freq
+// 470 in demand freq
+
+// QF demand ved 12V 50% PWM er 500 mikrosekunder = 0,0005s og 1/0,0005=2000på oscilloskop 
+// 2002 målt på skærm
+
+// QF max ved 12V 100% PWM er 231 mikrosekunder = 0,000231s og 1/0,000231=4329 på osc.
+// 4212 ved skærm 4446, 4376, 4270 = 4326
 
 
 // ======================================================
@@ -78,7 +101,7 @@ void init_timerA0(void) {
 
     TA0CTL = TASSEL__ACLK | MC__CONTINUOUS | ID_0;  // Det her er opsætningen af timer 0, den som står for at capture vores værdier
                                                      // Tassel_1, ACLK (analog clock), er den clock source der er i microcontrolleren. Den kører på 32kHz cirka.
-                                                     // MC_2 ELLER MC__CONTINUOUS tæller fra 0 til 0FFFFh og forfra. 0FFFFh er det samme som vores clock-værdi. 
+                                                     // MC_2 ELLER MC__CONTINUOUS tæller fra 0 til 0FFFFh og forfra. 0FFFFh er det samme som 2^16=65000 ish. 
                                                      // TACLR er en function der nulstiller clock divideren. Vi bruger ikke en clockdivider, så det er lidt mærkeligt at nulstille den. 
 
     // CCR1 Capture med control register 1
@@ -118,11 +141,11 @@ __interrupt void Timer_A0_ISR(void)
                                         // aldrig kunne få et negativt tal når vi trækker dem fra hinanden. 
                                         // I stedet tæller vi bare op igen, når vi rammer nul, og det giver os 
                                         // stadig den rigtige forskel mellem de tog tal.
-            if (diff < 5) {               // threshold depends on expected frequency
-            last1 = now;
-            TA0CCTL1 &= ~CCIFG;
-            break;                    // ignore this bad capture
-            }
+                if (diff < 5) {               // threshold depends on expected frequency
+                last1 = now;
+                TA0CCTL1 &= ~CCIFG;
+                break;                    // ignore this bad capture
+                }
 
             last1 = now; // Vi sætter last til at være vores nuværende værdi. 
 
@@ -135,7 +158,8 @@ __interrupt void Timer_A0_ISR(void)
 
         case TA0IV_TACCR2:      // ---- CCR2 event ---- Hvis der står CC2 i IV.
         {
-            uint16_t now = TA0CCR2;
+            last1 = TA0CCR2;
+            /*
             uint16_t diff = now - last2;
 
             if (diff < 5) {               // threshold depends on expected frequency
@@ -147,7 +171,7 @@ __interrupt void Timer_A0_ISR(void)
             cap2_delta = diff ?: 1;
             last2 = now;
 
-            new_freq2 = 1; // Ikke i brug endnu
+            new_freq2 = 1; // Ikke i brug endnu */
             TA0CCTL2 &= ~CCIFG;  // ⬅ IMPORTANT!
         }
         break;
@@ -169,6 +193,7 @@ int main() {
     __delay_cycles(100000);
 
     // OLED init
+    // SDA 3.0 SCL 3.1
     i2c_init();
     __delay_cycles(100000);
     ssd1306_init();
@@ -193,13 +218,14 @@ int main() {
     char buffer[20];
 
     int counter;
+    uint new_duty;
 
     while (1) // Her printer vi reelt set bare alle vores tal. 
     {
         if (new_freq1==1)
         {
             freq1 = 32768.0f / (float)cap1_delta; // Vi udregner tællinger per sekund. Det gør vi ved at tage ACLK og dele med differencen.
-            rpm1 = (freq1 * 60.0f) / PULSES_PER_REV; // Derfra regner vi omgang per minut.  
+            //rpm1 = (freq1 * 60.0f) / PULSES_PER_REV; // Derfra regner vi omgang per minut. JUSTER TIL HØJERE ANTAL PULSE
 
             average_freq += freq1;
             counter++;
@@ -210,40 +236,29 @@ int main() {
                 counter=0;
             }
 
+            errorCC = gain * (demand_freq-freq1);
+            TA1CCR1 = TA1CCR1+errorCC;
+
+            new_duty = (float)(TA1CCR1*100/TA1CCR0);
+
             new_freq1=0;
         }
-        
-        if(new_freq2==1) {
-            
-            freq2 = 32768.0f / (float)cap2_delta;
-            rpm2 = (freq2 * 60.0f) / PULSES_PER_REV;
 
-            new_freq2=0;
-        }
-
-        //sprintf(buffer, "DUTY: %03u%%", duty_cycle);
-        //ssd1306_printText(0, 0, buffer);
-
-        // TA0 raw timestamps (debug)
-        sprintf(buffer, "TA0CCR1:%05u", TA0CCR1);
+        // 
+        sprintf(buffer, "Demand freq:%04u", (int)demand_freq);
         ssd1306_printText(0, 1, buffer);
 
-        sprintf(buffer, "TA0CCR2:%05u", TA0CCR2);
+        sprintf(buffer, "Encoder Freq:%5d", (int)display_freq);
         ssd1306_printText(0, 2, buffer);
 
-        // updated by ISR
-        sprintf(buffer, "F1:%5d", (int)display_freq);
-        //sprintf(buffer, "FREQ1:%6.1f", freq1);
+        sprintf(buffer, "Error CC:%05u", errorCC);
         ssd1306_printText(0, 3, buffer);
 
-        sprintf(buffer, "RPM1:%5d", (int)rpm1);
+        sprintf(buffer, "Duty: %03u%%", new_duty);
         ssd1306_printText(0, 4, buffer);
 
-        sprintf(buffer, "F2:%5d", (int)freq2);
-        //sprintf(buffer, "FREQ2:%6.1f", freq2);
+        sprintf(buffer, "TA1CCR1:%03u", TA1CCR1);
         ssd1306_printText(0, 5, buffer);
 
-        sprintf(buffer, "RPM2:%5d", (int)rpm2);
-        ssd1306_printText(0, 6, buffer);
     }
 }
