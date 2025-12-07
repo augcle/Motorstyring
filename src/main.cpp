@@ -40,7 +40,7 @@ uint16_t display_freq = 0; // Varibel der bruges til at vise vores mere stabile 
 int16_t errorCC = 0; // Varibel der bruges til at gemme hvor meget som TA1CCR1 skal reguleres med.
 
 // ======================================================
-//  CLOCK: 25 MHz SMCLK
+//  CLOCK: 20 MHz SMCLK
 // ======================================================
 void init_SMCLK_25MHz() {
     WDTCTL = WDTPW | WDTHOLD; // Stop watch-dog timeren. Det skal vi bare.
@@ -70,7 +70,7 @@ void init_SMCLK_25MHz() {
 //  PWM on Timer A1 — OUTMOD_2 (center-aligned)
 // ======================================================
 void init_timerA1(void) {
-    TA1CTL = TASSEL_2 | MC_3 | ID_0;  // Tassel_2, eller SMCLK (sub master), er en clock vi selv har sat i funktionen over over til 25MHz.
+    TA1CTL = TASSEL_2 | MC_3 | ID_0;  // Tassel_2, eller SMCLK (sub master), er en clock vi selv har sat i funktionen oven over til 20MHz.
                                       // MC står for Mode Control, og mode control 3 er 'up/down' hvilket betyder den tæller fra 0 op til CCR0 og tilbage igen til 0. Altså en symmetrisk figur omkring CCR0.
                                       // ID_0 er 'input divider', hvilket betyder den dividere clocken. Ret brugbart hvis man skal have flere timere på samme clock der kører lidt forskudt af hinanden. Vi bruge bare ID_0, hvilket betyder vi dividerer med 1.
     TA1CCR0 = 1024;                   // PWM periodetiden, i form a den værdi vi gerne vil tælle op til
@@ -132,7 +132,7 @@ __interrupt void Timer_A0_ISR(void)
             if (diff < 5) {     //Et check-statement der frasorterer 'dårlige' målinger. 
                                 // Altså hvis differencen ligger alt for tæt på hinanden, bliver den gemt, men ikke brugt til en beregning
                 last1 = now;    // Gem den indlæste værdi i vores seneste værdi. Så vi kan bruge den senere.   
-                cap1_delta = 16.384; // Hvis vores difference er meget lille, så sætter vi vores forskel til en kostant. Konstanten kommer fra at tager clock-frekvensen, og dividere med demand frekvensen. På denne måde, vil vi havne med en frekvensforskel på 0, altså at vi har 'ramt' vores demand.  
+                cap1_delta = 16.384; // Hvis vores difference er meget lille, så sætter vi vores forskel til en konstant. Konstanten kommer fra at tage clock-frekvensen, og dividere med demand frekvensen. På denne måde, vil vi havne med en frekvensforskel på 0, altså at vi har 'ramt' vores demand. Det er kunstigt sat op, og vil medfører vi faktisk aldrig får en helt perfekt duty cycle.  
                 break;          // Vi hopper ud af switchen
             }
 
